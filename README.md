@@ -1,14 +1,16 @@
 # Coupling_decay_experiments_with_spectroscopy
 This repository was designed for a study on plant decomposition.
 
+## Data Availability
+You can find the *betula* leaf decomposition multispectral imaging data: which is a folder that was compressed and that is called **'data_betula_clay.zip'** at this ()[link]. It contains all the 337 pictures in a .tif format taken during the multispectral imaging.
+
 ## Content of the Repository
 This repository contains:
-1. A *betula* leaf decomposition multispectral imaging data: which is a folder that was compressed and that is called **'data_betula_clay'**. It contains all the 337 pictures in a .tif format taken during the multispectral imaging.
-2. A *betula* leaf decomposition spectroscopy data, which is a .csv called **'betula_clay_spectral_data.csv'**. It is the result of running the **'Jeti_spectrophotometer_plot_maker.ipynb'** and it is used in the **'Leaf_taphonomy_analysis.Rmd'** for the analysis.
-3. A python script to process the multispectral imaging data, which is called **'Leaf_decomposition_pipeline.ipynb'**. It outputs: .tif composite image for both fluorescence and reflectance, progression figures made with the .tif composites, overlays in form of 5x5 grids showing you what the script identified as a leaf and a Petri dish and a .csv file containing the leaf surface plus the average intensity that was measured over the leaf for each measurements.
-4. A python script to process the spectral data, which is called **'Jeti_spectrophotometer_plot_maker.ipynb'**. It outputs the following, plots of the spectrophotometry with or without various form of normalization in multiple format, depending of the user's will and a combined .csv file with all the data put together and that can be reused later in the R analysis (here we outputted: **'betula_clay_spectral_data.csv'**)
-5. An R Markdown document to realize the statistical analysis and figures of the article, which is called **'Leaf_taphonomy_analysis.Rmd'**.
-6. A knitted and cleaned version of **'Leaf_taphonomy_analysis.Rmd'**, called **'Betula_ leaf_taphonomy_analysis.docx'**, to avoid going through all the steps below.
+1. A *betula* leaf decomposition spectroscopy data, which is a .csv called **'betula_clay_spectral_data.csv'**. It is the result of running the **'Jeti_spectrophotometer_plot_maker.ipynb'** and it is used in the **'Leaf_taphonomy_analysis.Rmd'** for the analysis.
+2. A python script to process the multispectral imaging data, which is called **'Leaf_decomposition_pipeline.ipynb'**. It outputs: .tif composite image for both fluorescence and reflectance, progression figures made with the .tif composites, overlays in form of 5x5 grids showing you what the script identified as a leaf and a Petri dish and a .csv file containing the leaf surface plus the average intensity that was measured over the leaf for each measurements.
+3. A python script to process the spectral data, which is called **'Jeti_spectrophotometer_plot_maker.ipynb'**. It outputs the following, plots of the spectrophotometry with or without various form of normalization in multiple format, depending of the user's will and a combined .csv file with all the data put together and that can be reused later in the R analysis (here we outputted: **'betula_clay_spectral_data.csv'**)
+4. An R Markdown document to realize the statistical analysis and figures of the article, which is called **'Leaf_taphonomy_analysis.Rmd'**.
+5. A knitted and cleaned version of **'Leaf_taphonomy_analysis.Rmd'**, called **'Betula_ leaf_taphonomy_analysis.docx'**, to avoid going through all the steps below.
 
 ## Guideline on how to Redo the Analysis
 Here is the step by step guideline on how to redo the analysis:
