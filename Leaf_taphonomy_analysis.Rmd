@@ -1,0 +1,1068 @@
+---
+title: "Leaf Taphonomy, Surface Preservation and Fluorescence"
+subtitle: "`r paste(c(params$species, params$substrate), collapse = ' / ')` | `r params$models` model(s)"
+author: "Alexis"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+# ---- ANALYSIS SETTINGS: change these three lines and knit ---------------------
+params:
+  species:   "betula"    # all, Betula, Ginkgo, or both "Betula, Ginkgo"
+  substrate: "clay"    # all, clay, sand, carbonate, or several e.g. "clay, sand"
+  models:    "both"   # both, linear, or polynomial (degree 2)
+output:
+  word_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# =============================================================================
+# SETUP: libraries, settings and constants.
+# Everything in this document is generated from this file; all code is hidden
+# in the knitted Word file (echo = FALSE). To analyse a subset, change `species`
+# and `substrate` in the YAML header (e.g. Betula / clay).
+# =============================================================================
+library(tidyverse)   # dplyr, ggplot2, readr, stringr, purrr, tidyr, tibble
+library(patchwork)   # combined figures
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, dpi = 600)
+theme_set(theme_bw(base_family = "serif"))
+options(dplyr.summarise.inform = FALSE)
+
+# ---- Paths and spectra settings: edit here only ------------------------------
+paths <- list(
+  csv         = "/Path/to/your/CSV/leaf_fluorescence_surface.csv", # CSV obtained by running: Leaf_decomposition_pipeline.ipynb
+  progression = "/Path/to/your/progression/figures" # Composite figures obtained by running: Leaf_decomposition_pipeline.ipynb
+)
+
+spectra_cfg <- list(
+  csv       = "/Path/to/your/CSV/combined_corrected_spectra.csv", # Obtained by fusing all the csvs from spectral measurements using: Jeti_spectrophotometer_plot_maker.ipynb
+  save_dir  = "/Path/To/Where/You/Want/To/Save/Spectrum_plots_R",  # Path to save your new spectral figures
+  window_nm = c(625, 850),         # wavelength range shown and used for the normalisation
+  formats   = c("png", "pdf"),     # saved formats: png, pdf, svg, tiff, jpg
+  dpi       = 300,
+  free_y    = TRUE                 # TRUE: each substrate panel gets its own y scale
+)
+
+# ---- Filters and imaging channels --------------------------------------------
+# Filter windows (nm)
+filters <- tribble(
+  ~id,  ~lo,  ~hi,
+  "F2", 457,  487,
+  "F3", 500,  530,
+  "F4", 535,  607,
+  "F5", 620,  680,
+  "F6", 689,  749
+)
+
+# Imaging channels: the filter used and the illumination wavelength (the "x" in the name)
+channels <- tribble(
+  ~key,      ~filter, ~x_nm,
+  "F2_x470", "F2",    470,
+  "F3_x525", "F3",    525,
+  "F5_x635", "F5",    635,
+  "F4_x405", "F4",    405,
+  "F5_x405", "F5",    405,
+  "F6_x405", "F6",    405
+) %>%
+  left_join(filters, by = c("filter" = "id")) %>%
+  mutate(
+    win    = sprintf("F %d\u2013%d nm", lo, hi),
+    label  = sprintf("F %d\u2013%d nm, x%d", lo, hi, x_nm),
+    # illumination inside the filter window: the signal is reflected light;
+    # outside the window (shorter wavelength): it can only be fluorescence
+    signal = if_else(x_nm >= lo & x_nm <= hi, "reflectance", "fluorescence")
+  )
+
+# ---- Constants ----------------------------------------------------------------
+alpha      <- 0.05
+substrates <- c("clay", "sand", "carbonate")
+species_all <- c("Betula", "Ginkgo")
+ratio_cols <- c(paste0(channels$key, "_log2_ratio"), "F5_F6_log2_ratio")
+sub_cols   <- c(clay = "#0072B2", sand = "#E69F00", carbonate = "#009E73")  # Okabe-Ito, colour-blind safe
+
+# ---- Settings read from the YAML header --------------------------------------
+# Accepts one or several values separated by commas, in any case ("clay, Sand").
+split_opt <- function(x) {
+  x <- trimws(unlist(strsplit(as.character(x), "[,;/&]")))
+  tolower(x[nzchar(x)])
+}
+pick_levels <- function(opt, all_levels, what) {
+  o <- split_opt(opt)
+  if (length(o) == 0 || "all" %in% o) return(all_levels)
+  hit <- all_levels[tolower(all_levels) %in% o]
+  unknown <- setdiff(o, tolower(all_levels))
+  if (length(unknown) > 0 || length(hit) == 0) {
+    stop(sprintf("Unknown %s '%s' in the header. Allowed: all, %s.", what,
+                 paste(unknown, collapse = ", "), paste(all_levels, collapse = ", ")), call. = FALSE)
+  }
+  hit
+}
+focus_species   <- pick_levels(params$species,   species_all, "species")
+focus_substrate <- pick_levels(params$substrate, substrates,  "substrate")
+multi_sp  <- length(focus_species) > 1
+multi_sub <- length(focus_substrate) > 1
+
+# Which trend models are fitted, discussed and plotted
+model_opt <- split_opt(params$models)
+use_linear <- any(model_opt %in% c("both", "all", "linear", "lin", "simple"))
+use_poly   <- any(model_opt %in% c("both", "all", "polynomial", "poly", "quadratic", "degree 2"))
+if (!use_linear && !use_poly) {
+  stop("Unknown models setting '", params$models, "'. Allowed: both, linear, polynomial.", call. = FALSE)
+}
+model_types <- c(if (use_linear) "linear", if (use_poly) "polynomial")
+type_label  <- c(linear = "Linear", polynomial = "Polynomial (degree 2)")
+both_models <- length(model_types) == 2
+
+collapse_and <- function(x) if (length(x) == 1) x else paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)])
+species_txt   <- collapse_and(paste0("*", focus_species, "*"))
+substrate_txt <- collapse_and(focus_substrate)
+
+# Samples removed from the statistics (the composite images still show them)
+excluded <- tribble(
+  ~leaf,          ~substrate,  ~reason,
+  "betula_rep7",  "clay",      "Leaf moved during imaging",
+  # TODO: the original comment said "ginkgo" for the two rep21 rows below,
+  # but the code removed "betula_rep21". Behaviour kept as it was: check which is right.
+  "betula_rep21", "carbonate", "Camera artefact",
+  "betula_rep21", "sand",      "Camera artefact",
+  "betula_rep4",  "sand",      "Wrong filters (F 442\u2013502 nm doubled, F 475\u2013545 nm missing)"
+)
+
+# ---- Issue logs: collected silently, displayed only if something is found -----
+data_issues <- character()
+flag <- function(msg) data_issues <<- c(data_issues, msg)
+spectra_issues <- character()
+note_issue <- function(msg) spectra_issues <<- c(spectra_issues, msg)
+
+# ---- Statistics helpers ---------------------------------------------------------
+# Number formatting with a typographic minus sign
+num <- function(x, d = 2) sub("^-", "−", formatC(x, format = "f", digits = d))
+
+fmt_p <- function(p) {
+  if (is.na(p)) "*p* = NA" else if (p < 0.001) "*p* < 0.001" else sprintf("*p* = %.3f", p)
+}
+
+# One row per model term from the (sequential) ANOVA table
+anova_tab <- function(m) {
+  a <- anova(m)
+  tibble(term = rownames(a), df = a$Df, F_value = a$`F value`, p = a$`Pr(>F)`,
+         df_res = a["Residuals", "Df"])
+}
+
+stat_txt <- function(r) {
+  sprintf("*F*(%g, %g) = %s, %s", r$df, r$df_res, num(r$F_value), fmt_p(r$p))
+}
+
+r2_txt <- function(m) {
+  s <- summary(m)
+  sprintf("*R*² = %s (adj. *R*² = %s)", num(s$r.squared), num(s$adj.r.squared))
+}
+
+# Overall F-test of the whole model (all terms together)
+model_f <- function(m) {
+  f <- summary(m)$fstatistic
+  list(F = unname(f[1]), df1 = unname(f[2]), df2 = unname(f[3]),
+       p = unname(pf(f[1], f[2], f[3], lower.tail = FALSE)))
+}
+
+term_label <- c(species = "species", time = "burial time", `I(time^2)` = "burial time²",
+                substrate = "substrate")
+
+# One-line summary of a model: verdict + F + p for each term, then R2 and n.
+# Linear: the verdict gives the direction and the text the slope per day.
+# Polynomial: the quadratic term gives the curvature (concave down / up).
+summarise_model <- function(m, type = "linear") {
+  if (is.null(m)) return("model not available (see data warnings).")
+  a <- filter(anova_tab(m), term != "Residuals")
+  parts <- map_chr(seq_len(nrow(a)), function(i) {
+    r <- a[i, ]
+    verdict <- if (is.na(r$p)) "not estimable" else if (r$p < alpha) "significant" else "not significant"
+    detail  <- stat_txt(r)
+    if (r$term == "time" && type == "linear") {
+      slope <- coef(m)[["time"]]
+      if (isTRUE(r$p < alpha)) verdict <- paste(verdict, if (slope < 0) "decrease" else "increase")
+      detail <- sprintf("%s; slope = %s per day", detail, num(slope, 3))
+    }
+    if (r$term == "I(time^2)" && isTRUE(r$p < alpha)) {
+      verdict <- paste(verdict, if (coef(m)[["I(time^2)"]] < 0) "(concave down)" else "(concave up)")
+    }
+    sprintf("%s: %s (%s)", term_label[[r$term]], verdict, detail)
+  })
+  mf <- model_f(m)
+  paste0(paste(parts, collapse = "; "),
+         sprintf("; whole model: *F*(%g, %g) = %s, %s", mf$df1, mf$df2, num(mf$F), fmt_p(mf$p)),
+         "; ", r2_txt(m), "; AIC = ", num(AIC(m), 1), "; *n* = ", nobs(m), ".")
+}
+
+# Linear vs polynomial for one response and group: nested F-test, AIC, adjusted R2.
+# The polynomial is preferred only if the quadratic term is significant AND the AIC is lower;
+# otherwise the simpler linear model is kept.
+compare_models <- function(set) {
+  ml <- set[["linear"]]; mp <- set[["polynomial"]]
+  if (is.null(ml) || is.null(mp)) return(NULL)
+  a <- anova(ml, mp)
+  p <- a$`Pr(>F)`[2]
+  list(F = a$F[2], df = a$Df[2], df_res = a$Res.Df[2], p = p,
+       aic_l = AIC(ml), aic_p = AIC(mp),
+       adj_l = summary(ml)$adj.r.squared, adj_p = summary(mp)$adj.r.squared,
+       best = if (isTRUE(p < alpha) && AIC(mp) < AIC(ml)) "polynomial" else "linear")
+}
+
+compare_txt <- function(set) {
+  cmp <- compare_models(set)
+  if (is.null(cmp)) return("**Best model:** not available (one of the models could not be fitted).")
+  sprintf("**Best model: %s.** The quadratic term %s the fit (nested *F*(%g, %g) = %s, %s); linear vs polynomial: AIC %s vs %s, adj. *R*² %s vs %s.",
+          cmp$best, if (cmp$best == "polynomial") "improves" else "does not significantly improve",
+          cmp$df, cmp$df_res, num(cmp$F), fmt_p(cmp$p),
+          num(cmp$aic_l, 1), num(cmp$aic_p, 1), num(cmp$adj_l), num(cmp$adj_p))
+}
+
+# Markdown bullets for all groups of one response (pooled / per species)
+bullets <- function(key) {
+  txt <- map_chr(names(models[[key]]), function(g) {
+    set <- models[[key]][[g]]
+    if (!both_models) {
+      return(paste0("- **", g, ":** ", summarise_model(set[[model_types]], model_types)))
+    }
+    lines <- c(map_chr(model_types, ~ paste0("    - ", type_label[[.x]], ": ", summarise_model(set[[.x]], .x))),
+               paste0("    - ", compare_txt(set)))
+    paste0("- **", g, "**\n", paste(lines, collapse = "\n"))
+  })
+  paste(txt, collapse = "\n")
+}
+
+# Mean ± SD of a response by substrate, written out for each species (only if several substrates)
+means_line <- function(key, d = 2) {
+  if (!multi_sub) return("")
+  response <- responses[[key]]
+  txt <- paired_data %>%
+    filter(!is.na(.data[[response]])) %>%
+    group_by(species, substrate) %>%
+    summarise(m = mean(.data[[response]]), s = sd(.data[[response]]), .groups = "drop") %>%
+    group_by(species) %>%
+    summarise(txt = paste0("*", first(species), "* — ",
+                           paste0(substrate, " ", num(m, d), " ± ", num(s, d), collapse = ", ")),
+              .groups = "drop") %>%
+    pull(txt) %>%
+    paste(collapse = "; ")
+  paste0("Mean ± SD by substrate: ", txt, ".")
+}
+
+# ---- Model helpers --------------------------------------------------------------
+# Groups modelled: pooled (if several species), then each species on its own
+groups <- c(if (multi_sp) "Pooled", focus_species)
+group_data <- function(g) if (g == "Pooled") paired_data else filter(paired_data, species == g)
+group_terms <- function(g, type = "linear") {
+  c(if (g == "Pooled") "species", "time", if (type == "polynomial") "I(time^2)", if (multi_sub) "substrate")
+}
+
+# Fits one model; a model that cannot be fitted is returned as NULL and logged
+fit_one <- function(response, g, type = "linear") {
+  d <- group_data(g)
+  d <- d[!is.na(d[[response]]) & !is.na(d$time), ]
+  if (nrow(d) < 6 || n_distinct(d$time) < 3) {
+    flag(sprintf("%s (%s, %s): fewer than 6 observations or 3 burial times, model skipped.",
+                 response, g, type))
+    return(NULL)
+  }
+  tryCatch(
+    lm(reformulate(group_terms(g, type), response), data = d),
+    error = function(e) {
+      flag(sprintf("%s (%s, %s): model failed (%s).", response, g, type, conditionMessage(e)))
+      NULL
+    }
+  )
+}
+
+# models[[response]][[group]][[type]]
+fit_set <- function(response) {
+  set_names(map(groups, function(g) set_names(map(model_types, ~ fit_one(response, g, .x)), model_types)),
+            groups)
+}
+
+# ---- Plot helpers ---------------------------------------------------------------
+lab_log2 <- function(txt) bquote(log[2] * "(" * .(txt) * ")")
+
+# The curves drawn are the fitted analysis models themselves (models[[key]][[species]][[type]]):
+# one curve per substrate (same slope, substrate shifts the intercept), with 95 % CI.
+# Pooled models have no panel of their own; each panel shows the model of its species.
+response_key <- function(response) names(responses)[match(response, responses)]
+
+model_curves <- function(response, type) {
+  key <- response_key(response)
+  map_dfr(focus_species, function(sp) {
+    m <- models[[key]][[sp]][[type]]
+    if (is.null(m)) return(NULL)
+    rng <- range(m$model$time)
+    grid <- expand_grid(time = seq(rng[1], rng[2], length.out = 100),
+                        substrate = factor(focus_substrate, levels = substrates))
+    pr <- as_tibble(predict(m, newdata = grid, interval = "confidence"))
+    bind_cols(grid, pr) %>% mutate(species = factor(sp, levels = species_all))
+  })
+}
+
+# Text drawn on each panel, taken from the same models as the text of the analysis:
+# p-value of the whole model (overall F-test), R2 and adjusted R2 of the whole model,
+# and the fitted equation per substrate (the equations belong to that one model)
+fmt_p_short <- function(p) if (is.na(p)) "n/a" else if (p < 0.001) "< 0.001" else sprintf("= %.3f", p)
+
+model_labels <- function(response, type) {
+  key <- response_key(response)
+  map_dfr(focus_species, function(sp) {
+    m <- models[[key]][[sp]][[type]]
+    if (is.null(m)) return(NULL)
+    a  <- anova_tab(m)
+    co <- coef(m)
+    mf <- model_f(m)
+    header <- sprintf("Whole model: p %s; R\u00b2 = %s, adj. R\u00b2 = %s",
+                      fmt_p_short(mf$p), num(summary(m)$r.squared), num(summary(m)$adj.r.squared))
+    eq <- map_chr(focus_substrate, function(sb) {
+      b0 <- co[["(Intercept)"]] + if (multi_sub && paste0("substrate", sb) %in% names(co)) co[[paste0("substrate", sb)]] else 0
+      b1 <- co[["time"]]
+      txt <- paste0("y = ", num(b0, 2), if (b1 < 0) " − " else " + ", sprintf("%.3f", abs(b1)), "t")
+      if (type == "polynomial") {
+        b2 <- co[["I(time^2)"]]
+        txt <- paste0(txt, if (b2 < 0) " − " else " + ", formatC(abs(b2), format = "g", digits = 2), "t²")
+      }
+      if (multi_sub) paste0(sb, ": ", txt) else txt
+    })
+    bind_rows(
+      tibble(species = sp, substrate = NA_character_, label = header, row = 1),
+      tibble(species = sp, substrate = focus_substrate, label = eq, row = seq_along(focus_substrate) + 1)
+    )
+  }) %>% mutate(species = factor(species, levels = species_all),
+                substrate = factor(substrate, levels = substrates))
+}
+
+# One trend plot (type = "linear" or "polynomial"): fitted analysis model + its statistics on the graph
+plot_change <- function(response, ylab, title = NULL, type = "linear") {
+  curves <- model_curves(response, type)
+  lab <- model_labels(response, type)
+  n_lines <- 1 + length(focus_substrate)
+
+  p <- ggplot(filter(paired_data, !is.na(.data[[response]])),
+              aes(x = time, y = .data[[response]], colour = substrate, fill = substrate)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_point(position = position_jitter(width = 0.4, height = 0, seed = 1), alpha = 0.6) +
+    geom_ribbon(data = curves, aes(x = time, ymin = lwr, ymax = upr, fill = substrate, group = substrate),
+                alpha = 0.2, colour = NA, inherit.aes = FALSE) +
+    geom_line(data = curves, aes(x = time, y = fit, colour = substrate, group = substrate),
+              linewidth = 1, inherit.aes = FALSE) +
+    geom_text(data = lab, aes(x = -Inf, y = Inf, label = label, colour = substrate, vjust = 1.4 * row - 0.2),
+              hjust = -0.04, size = 2.6, family = "serif", inherit.aes = FALSE, show.legend = FALSE) +
+    scale_colour_manual(values = sub_cols, guide = if (multi_sub) "legend" else "none",
+                        na.value = "black") +
+    scale_fill_manual(values = sub_cols, guide = if (multi_sub) "legend" else "none") +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.05 + 0.075 * n_lines))) +
+    labs(x = "Days buried", y = ylab, colour = "Substrate", fill = "Substrate", title = title) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5))
+  if (multi_sp) p <- p + facet_wrap(~ species)
+  p
+}
+
+# Stack the change plots of several channels in one figure
+plot_channels <- function(keys, type = "linear") {
+  plots <- map(keys, function(k) {
+    plot_change(responses[[k]], lab_log2("final / initial"),
+                title = channels$label[channels$key == k], type = type)
+  })
+  wrap_plots(plots, ncol = 1, guides = "collect") & theme(legend.position = "bottom")
+}
+
+# Draw one figure per selected model type (use inside a chunk with fig.cap = trend_caps(...))
+draw_trends <- function(fun) for (tp in model_types) print(fun(tp))
+trend_caps <- function(subject) {
+  sprintf("%s model: %s. Dashed line = no change. Curves are the fitted models of the analysis for each species (one curve per substrate, shaded = 95 %% CI). Text: p-value (overall F-test), R\u00b2 and adjusted R\u00b2 of the whole model, and its fitted equation for each substrate (t = days buried); all equations belong to the same model and share its p-value.",
+          type_label[model_types], subject)
+}
+
+# ---- Image helper -----------------------------------------------------------------
+# Shows the images of a folder; `must_match` keeps only file names containing
+# all the given words (case-insensitive).
+show_images <- function(dir, must_match = NULL) {
+  files <- list.files(dir, pattern = "\\.(jpg|png)$", full.names = TRUE, ignore.case = TRUE)
+  for (w in must_match) files <- files[str_detect(tolower(basename(files)), fixed(tolower(w)))]
+  if (length(files) == 0) {
+    return(knitr::asis_output(sprintf("*No images found in `%s`%s.*\n", dir,
+      if (length(must_match)) paste0(" matching: ", paste(must_match, collapse = " + ")) else "")))
+  }
+  knitr::include_graphics(files)
+}
+
+# =============================================================================
+# SPECTRA: reading, windowing, normalisation and figures
+# =============================================================================
+spectra_methods <- list(
+  raw  = list(folder = "RAW",             title = "raw radiance",
+              ylab = "Radiance [W/(sr·m²·nm)]"),
+  auc  = list(folder = "AUC",             title = "AUC-normalised radiance",
+              ylab = "AUC-normalised radiance"),
+  time = list(folder = "time_normalized", title = "radiance per integration time",
+              ylab = "Radiance per integration time [W/(sr·m²·nm·ms)]")
+)
+
+# Total integration time in ms from a JETI "T_int [ms]" value such as "14 * 500.000"
+parse_tint_ms <- function(x) {
+  m <- str_match(x, "^\\s*(\\d+(?:\\.\\d+)?)\\s*\\*\\s*(\\d+(?:\\.\\d+)?)\\s*$")
+  total <- as.numeric(m[, 2]) * as.numeric(m[, 3])
+  if_else(is.finite(total) & total > 0, total, NA_real_)
+}
+
+# Reads the combined csv; only the requested species/substrates are kept
+# (fresh leaves are never used). Unreadable names are logged and skipped.
+load_spectra <- function(csv, species_keep, substrates_keep) {
+  if (!file.exists(csv)) stop("cannot find the spectra csv: ", csv, call. = FALSE)
+
+  raw <- read_csv(
+    csv, show_col_types = FALSE,
+    col_select = c(src = "Source file", col = "Column in file", name = "Name",
+                   tint = "T_int [ms]", wl = "Wavelength [nm]", Le = "Le [W/(sr*sqm*nm)]")
+  )
+
+  # Names look like betula_clay_49d_spectrum
+  parts <- str_match(raw$name, "^(betula|ginkgo|gingo)_(clay|sand|carbonate|fresh)_(\\d+)d_spectrum$")
+  unknown <- unique(raw$name[is.na(parts[, 1])])
+  if (length(unknown) > 0) {
+    note_issue(sprintf("Unrecognised spectrum name(s) skipped: %s.", paste(unknown, collapse = ", ")))
+  }
+  typo <- unique(raw$name[!is.na(parts[, 2]) & parts[, 2] == "gingo"])
+  if (length(typo) > 0 && "ginkgo" %in% species_keep) {
+    note_issue(sprintf("Typo 'gingo' read as 'ginkgo' in: %s.", paste(typo, collapse = ", ")))
+  }
+
+  raw %>%
+    mutate(
+      species   = recode(parts[, 2], gingo = "ginkgo"),
+      substrate = parts[, 3],
+      day       = as.numeric(parts[, 4]),
+      tint_ms   = parse_tint_ms(tint)
+    ) %>%
+    filter(species %in% species_keep, substrate %in% substrates_keep) %>%
+    select(-tint)
+}
+
+# Every spectrum is exported twice in the same file: keep one copy, and say so
+# if the two copies are not identical.
+drop_duplicate_columns <- function(d) {
+  keys <- distinct(d, name, src, col)
+  keep <- keys %>%
+    group_by(name, src) %>%
+    slice_min(col, n = 1, with_ties = FALSE) %>%
+    ungroup()
+  dropped <- anti_join(keys, keep, by = c("name", "src", "col"))
+
+  curve <- function(n, s, c) d %>% filter(name == n, src == s, col == c) %>% arrange(wl) %>% pull(Le)
+  for (i in seq_len(nrow(dropped))) {
+    kept_col <- keep$col[keep$name == dropped$name[i] & keep$src == dropped$src[i]]
+    same <- isTRUE(all.equal(curve(dropped$name[i], dropped$src[i], dropped$col[i]),
+                             curve(dropped$name[i], dropped$src[i], kept_col), tolerance = 1e-9))
+    if (!same) {
+      note_issue(sprintf("%s (%s): duplicate column %d differs from column %d; column %d was used.",
+                         dropped$name[i], dropped$src[i], dropped$col[i], kept_col, kept_col))
+    }
+  }
+
+  semi_join(d, keep, by = c("name", "src", "col")) %>%
+    mutate(spectrum = paste(src, col, sep = ":"))
+}
+
+# Keeps the wavelength window. Spectra without data inside it are skipped and
+# reported; rows lost inside the window are reported (the line is drawn across).
+window_spectra <- function(d, window) {
+  in_win <- d %>%
+    filter(!is.na(Le), wl >= window[1], wl <= window[2]) %>%
+    arrange(spectrum, wl)
+
+  ok <- in_win %>% count(spectrum) %>% filter(n >= 2) %>% pull(spectrum)
+  bad <- d %>% filter(!spectrum %in% ok) %>% group_by(name, src) %>%
+    summarise(avail_lo = suppressWarnings(min(wl[!is.na(Le)])),
+              avail_hi = suppressWarnings(max(wl[!is.na(Le)])), .groups = "drop")
+  for (i in seq_len(nrow(bad))) {
+    note_issue(sprintf(
+      "%s (%s): no radiance inside %g-%g nm (data only cover %g-%g nm); spectrum skipped.",
+      bad$name[i], bad$src[i], window[1], window[2], bad$avail_lo[i], bad$avail_hi[i]))
+  }
+
+  gaps <- in_win %>%
+    filter(spectrum %in% ok) %>%
+    group_by(spectrum, name, src) %>%
+    summarise(missing = sum(pmax(round(diff(wl)) - 1, 0)), .groups = "drop") %>%
+    filter(missing > 0)
+  for (i in seq_len(nrow(gaps))) {
+    note_issue(sprintf("%s (%s): %d wavelength(s) missing inside the window; line interpolated across the gap(s).",
+                       gaps$name[i], gaps$src[i], gaps$missing[i]))
+  }
+
+  filter(in_win, spectrum %in% ok)
+}
+
+# Plotted values of one spectrum, or NULL (after logging why)
+normalise_one <- function(s, method) {
+  if (method == "raw") return(s$Le)
+
+  if (method == "auc") {   # area under the curve inside the window
+    auc <- sum(diff(s$wl) * (head(s$Le, -1) + tail(s$Le, -1)) / 2)
+    if (!is.finite(auc) || auc <= 0) {
+      note_issue(sprintf("%s: AUC is zero, negative or non-finite; skipped for the AUC plots.", s$name[1]))
+      return(NULL)
+    }
+    return(s$Le / auc)
+  }
+
+  if (method == "time") {  # radiance per ms of total integration time
+    t <- s$tint_ms[1]
+    if (is.na(t)) {
+      note_issue(sprintf("%s: no valid integration time; skipped for the time-normalised plots.", s$name[1]))
+      return(NULL)
+    }
+    return(s$Le / t)
+  }
+
+  stop("Unknown method: ", method, call. = FALSE)
+}
+
+normalise_all <- function(win, method) {
+  pieces <- map(split(win, win$spectrum), function(s) {
+    y <- normalise_one(s, method)
+    if (is.null(y)) NULL else mutate(s, y = y)
+  })
+  bind_rows(compact(pieces))
+}
+
+# Filter windows drawn above the spectra. Only filters overlapping the plotted
+# range are shown, clipped to it; the label always gives the full window.
+filter_strip <- function(window) {
+  f <- filters %>%
+    filter(hi > window[1], lo < window[2]) %>%
+    mutate(row = row_number(),
+           xmin = pmax(lo, window[1]), xmax = pmin(hi, window[2]),
+           label = sprintf("F %d\u2013%d nm", lo, hi),
+           narrow = (xmax - xmin) < 70)
+  ggplot(f) +
+    geom_rect(aes(xmin = xmin, xmax = xmax, ymin = row - 0.42, ymax = row + 0.42),
+              fill = "grey88", colour = "grey30", linewidth = 0.3) +
+    geom_text(data = filter(f, !narrow), aes(x = (xmin + xmax) / 2, y = row, label = label),
+              size = 3, family = "serif") +
+    geom_text(data = filter(f, narrow), aes(x = xmax + 3, y = row, label = label),
+              size = 3, family = "serif", hjust = 0) +
+    scale_x_continuous(limits = window, expand = c(0, 0)) +
+    scale_y_reverse(expand = c(0.05, 0.05)) +
+    theme_void(base_family = "serif") +
+    theme(panel.border = element_rect(colour = "grey30", fill = NA, linewidth = 0.3))
+}
+
+# One figure per species: one panel per substrate, one line per burial time
+plot_species <- function(curves, species_name, method, cfg) {
+  info <- spectra_methods[[method]]
+  d <- filter(curves, species == species_name)
+  if (nrow(d) == 0) return(NULL)
+
+  panel_levels <- substrates[substrates %in% d$substrate]
+  d <- mutate(d, substrate = factor(substrate, levels = panel_levels),
+              day_f = factor(day, levels = sort(unique(day)), labels = paste(sort(unique(day)), "d")))
+
+  p <- ggplot(d, aes(x = wl, y = y, colour = day_f, group = spectrum)) +
+    geom_line(linewidth = 0.7) +
+    facet_wrap(~ substrate, ncol = 1, scales = if (cfg$free_y) "free_y" else "fixed",
+               labeller = labeller(substrate = str_to_sentence)) +
+    scale_colour_viridis_d(option = "D", end = 0.9, name = "Days buried") +
+    scale_x_continuous(limits = cfg$window_nm, expand = c(0, 0),
+                       breaks = seq(ceiling(cfg$window_nm[1] / 25) * 25, cfg$window_nm[2], by = 25)) +
+    labs(x = "Wavelength (nm)", y = info$ylab) +
+    theme(legend.position = "bottom",
+          strip.text = element_text(face = "bold", hjust = 0),
+          panel.grid.minor = element_blank())
+
+  (filter_strip(cfg$window_nm) / p) +
+    plot_layout(heights = c(1.1, 1.9 * length(panel_levels))) +
+    plot_annotation(title = sprintf("%s — %s", str_to_sentence(species_name), info$title),
+                    theme = theme(plot.title = element_text(face = "bold", hjust = 0.5,
+                                                            family = "serif", size = 14)))
+}
+
+# Builds every spectra figure and saves them. Returns list(plots, files); problems
+# are logged in spectra_issues instead of stopping the document.
+build_spectra <- function(cfg, species_keep, substrates_keep) {
+  d   <- load_spectra(cfg$csv, species_keep, substrates_keep) %>% drop_duplicate_columns()
+  win <- window_spectra(d, cfg$window_nm)
+  if (nrow(win) == 0) stop("no spectrum has data inside the chosen wavelength window", call. = FALSE)
+
+  plots <- list(); files <- character()
+  for (method in names(spectra_methods)) {
+    curves <- normalise_all(win, method)
+    out_dir <- file.path(cfg$save_dir, spectra_methods[[method]]$folder)
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+    for (sp in species_keep) {
+      p <- plot_species(curves, sp, method, cfg)
+      if (is.null(p)) {
+        note_issue(sprintf("%s: nothing to draw for %s.", sp, spectra_methods[[method]]$title))
+        next
+      }
+      plots[[method]][[sp]] <- p
+      n_panels <- n_distinct(curves$substrate[curves$species == sp])
+      stem <- file.path(out_dir, paste0(str_to_sentence(sp), "_", spectra_methods[[method]]$folder))
+      for (fmt in cfg$formats) {
+        path <- paste0(stem, ".", fmt)
+        ggsave(path, p, width = 8, height = 1.4 + 2.2 * n_panels + 0.9, units = "in", dpi = cfg$dpi,
+               device = if (fmt == "pdf") grDevices::cairo_pdf else NULL)
+        files <- c(files, path)
+      }
+    }
+  }
+  list(plots = plots, files = files)
+}
+
+# Captions of the figures of one method (one per species drawn)
+spectra_caps <- function(method) {
+  sp <- names(spectra_result$plots[[method]])
+  if (length(sp) == 0) return(NULL)
+  sprintf("%s: %s, %g–%g nm. The bars above give the filter windows (clipped to the plotted range).",
+          str_to_sentence(sp), spectra_methods[[method]]$title, spectra_cfg$window_nm[1], spectra_cfg$window_nm[2])
+}
+
+# Overview of the filter windows and the illumination wavelengths of the channels
+plot_filter_overview <- function(range = c(400, 850)) {
+  f <- mutate(filters, row = row_number())
+  leds <- distinct(channels, x_nm)
+  w <- spectra_cfg$window_nm
+  ggplot() +
+    annotate("rect", xmin = w[1], xmax = w[2], ymin = 0.3, ymax = nrow(f) + 0.7, fill = "grey93") +
+    annotate("text", x = mean(w), y = 0.05, label = sprintf("spectra window %g–%g nm", w[1], w[2]),
+             size = 3, family = "serif") +
+    geom_vline(data = leds, aes(xintercept = x_nm), linetype = "dotted", colour = "#0072B2") +
+    geom_text(data = leds, aes(x = x_nm, y = nrow(f) + 1, label = paste0(x_nm, " nm")),
+              size = 3, family = "serif", colour = "#0072B2", angle = 90, hjust = 0.5, vjust = -0.4) +
+    geom_rect(data = f, aes(xmin = lo, xmax = hi, ymin = row - 0.38, ymax = row + 0.38),
+              fill = "grey80", colour = "grey30", linewidth = 0.3) +
+    geom_text(data = f, aes(x = (lo + hi) / 2, y = row, label = sprintf("F %d\u2013%d nm", lo, hi)),
+              size = 3, family = "serif") +
+    scale_x_continuous(limits = range, expand = c(0, 0)) +
+    scale_y_reverse(limits = c(nrow(f) + 1.9, -0.2), breaks = NULL) +
+    labs(x = "Wavelength (nm)", y = NULL) +
+    theme(panel.grid = element_blank())
+}
+```
+
+```{r data-prep, include=FALSE}
+# =============================================================================
+# DATA PREPARATION: import, validate, pair initial/final, compute responses
+# =============================================================================
+raw <- read_csv(paths$csv, show_col_types = FALSE)
+
+required <- c("leaf", "substrate", "date_in_days", "surface_cm2", paste0("mean_value_", channels$key))
+missing_cols <- setdiff(required, names(raw))
+if (length(missing_cols) > 0) {
+  stop("Missing column(s) in the csv: ", paste(missing_cols, collapse = ", "), call. = FALSE)
+}
+
+# Species, burial time (NA for the initial condition), factors
+data_clean <- raw %>%
+  mutate(
+    date_chr   = as.character(date_in_days),
+    is_initial = coalesce(date_chr == "initcond", FALSE),
+    time       = suppressWarnings(as.numeric(date_chr)),
+    species    = case_when(
+      str_detect(leaf, "^betula") ~ "Betula",
+      str_detect(leaf, "^ginkgo") ~ "Ginkgo"
+    ),
+    species    = factor(species, levels = species_all),
+    substrate  = factor(substrate, levels = substrates)
+  )
+
+# Skip rows that cannot be interpreted (unknown species/substrate or burial time)
+valid <- !is.na(data_clean$species) & !is.na(data_clean$substrate) &
+  (data_clean$is_initial | !is.na(data_clean$time))
+if (any(!valid)) {
+  flag(sprintf("%d row(s) with unrecognised species, substrate or burial time were skipped (leaves: %s).",
+               sum(!valid), paste(unique(data_clean$leaf[!valid]), collapse = ", ")))
+  data_clean <- data_clean[valid, ]
+}
+
+# Baseline (before burial) and post-burial measurements, same column logic for every channel
+suffix_map <- function(suffix) {
+  set_names(paste0("mean_value_", channels$key), paste0(channels$key, "_", suffix))
+}
+
+initial <- data_clean %>%
+  filter(is_initial) %>%
+  select(leaf, substrate, species, surface_initial = surface_cm2, all_of(suffix_map("initial")))
+
+post <- data_clean %>%
+  filter(!is.na(time)) %>%
+  select(leaf, substrate, species, time, surface_final = surface_cm2, all_of(suffix_map("final")))
+
+dup_initial <- initial %>% count(leaf, substrate) %>% filter(n > 1)
+if (nrow(dup_initial) > 0) {
+  flag(sprintf("%d leaf/substrate combination(s) have several initial measurements.", nrow(dup_initial)))
+}
+
+# Pair each leaf with its own baseline
+paired_data <- left_join(initial, post, by = c("leaf", "substrate", "species"))
+
+n_unpaired <- sum(is.na(paired_data$time))
+if (n_unpaired > 0) {
+  flag(sprintf("%d initial measurement(s) have no post-burial match and are ignored by the models.", n_unpaired))
+}
+
+# Responses: % surface change and log2 ratios (final / initial)
+paired_data <- paired_data %>%
+  mutate(surface_percent_change = 100 * (surface_final - surface_initial) / surface_initial)
+
+for (k in channels$key) {
+  paired_data[[paste0(k, "_log2_ratio")]] <-
+    suppressWarnings(log2(paired_data[[paste0(k, "_final")]] / paired_data[[paste0(k, "_initial")]]))
+}
+
+paired_data <- paired_data %>%
+  mutate(F5_F6_log2_ratio = suppressWarnings(
+    log2((F5_x405_final / F6_x405_final) / (F5_x405_initial / F6_x405_initial))
+  ))
+
+# Non-finite ratios (zero or negative signal) are set to NA and reported
+n_nonfinite <- sum(vapply(paired_data[ratio_cols], function(x) sum(is.nan(x) | is.infinite(x)), numeric(1)))
+if (n_nonfinite > 0) {
+  flag(sprintf("%d non-finite log2 ratio(s) (zero or negative signal) were set to NA.", n_nonfinite))
+}
+paired_data <- paired_data %>%
+  mutate(across(all_of(ratio_cols), ~ replace(.x, !is.finite(.x), NA_real_)))
+
+# Remove the excluded samples (and warn if one is not found in the data)
+n_found <- nrow(semi_join(paired_data, excluded, by = c("leaf", "substrate")))
+if (n_found < nrow(excluded)) {
+  flag(sprintf("Only %d of %d excluded samples were found in the data: check the leaf names.",
+               n_found, nrow(excluded)))
+}
+
+paired_data <- paired_data %>%
+  anti_join(excluded, by = c("leaf", "substrate")) %>%
+  arrange(species, substrate, leaf, time) %>%
+  select(leaf, substrate, species, time, surface_percent_change, all_of(ratio_cols))
+
+# Keep only the requested species and substrates
+paired_data <- paired_data %>%
+  filter(species %in% focus_species, substrate %in% focus_substrate)
+if (sum(!is.na(paired_data$time)) < 5) {
+  stop("Fewer than 5 paired measurements for the chosen species and substrate.", call. = FALSE)
+}
+
+# Exclusions that concern this subset (for the table in the text)
+excluded_focus <- excluded %>%
+  filter(str_to_sentence(str_extract(leaf, "^[a-z]+")) %in% focus_species, substrate %in% focus_substrate)
+```
+
+```{r models, include=FALSE}
+# =============================================================================
+# MODELS: models$<response>$<Pooled | Betula | Ginkgo>$<linear | polynomial>
+# Terms: species (pooled only) + time (+ time^2 for the polynomial) + substrate (if several).
+# To model another response, add one line to `responses` and `resp_labels`.
+# =============================================================================
+responses <- c(
+  surface  = "surface_percent_change",
+  F4_x405  = "F4_x405_log2_ratio",
+  F5_x405  = "F5_x405_log2_ratio",
+  F6_x405  = "F6_x405_log2_ratio",
+  F5_F6    = "F5_F6_log2_ratio",
+  F2_x470  = "F2_x470_log2_ratio",
+  F3_x525  = "F3_x525_log2_ratio",
+  F5_x635  = "F5_x635_log2_ratio"
+)
+resp_labels <- c(surface = "Surface change (%)", F5_F6 = "F 590\u2013710 / F 659\u2013779 nm ratio",
+                 set_names(channels$label, channels$key))[names(responses)]
+
+models <- map(responses, fit_set)
+```
+
+```{r diagnostics, eval=FALSE}
+# Residual diagnostics: set eval=TRUE to inspect every model (4 panels each).
+# Check linearity, normal residuals, constant variance and influential points.
+walk(models, function(resp) walk(resp, function(grp) walk(compact(grp), function(m) {
+  par(mfrow = c(2, 2)); plot(m); par(mfrow = c(1, 1))
+})))
+```
+
+# Introduction
+
+This analysis tests how burial affects **leaf surface area** and **multispectral imaging signals** in `r species_txt` leaves buried in `r substrate_txt` for several durations. Each leaf is imaged before burial and again after recovery, so every response is expressed relative to the baseline of that same leaf (paired design). Leaf spectra were also acquired with a JETI spectrophotometer.
+
+The main questions are:
+
+1. How do leaf surface and the imaging signals (fluorescence and reflectance) change during burial?
+`r if (multi_sub) "2. Does the change depend on the substrate?" else ""`
+`r if (multi_sp) "3. Does the change differ between *Betula* and *Ginkgo*?" else ""`
+4. Are the spectra coherent with the multispectral imaging?
+
+# Filters and imaging channels
+
+The images are acquired through five filters, identified here only by their wavelength window (below). The windows overlap, and each imaging channel pairs one filter window with one illumination wavelength (the *x* in the channel name). When the illumination lies inside the filter window the channel records reflected light; when it lies at a shorter wavelength than the window, the channel can only record fluorescence.
+
+```{r filter-table}
+filters %>%
+  mutate(`Width (nm)` = hi - lo,
+         `Inside spectra window` = if_else(hi > spectra_cfg$window_nm[1] & lo < spectra_cfg$window_nm[2],
+                                           "yes", "no")) %>%
+  transmute(Filter = paste0("F ", lo, "–", hi, " nm"), `Width (nm)`, `Inside spectra window`) %>%
+  knitr::kable(align = "lcc",
+               caption = sprintf("Filter windows. The spectra are shown between %g and %g nm.",
+                                 spectra_cfg$window_nm[1], spectra_cfg$window_nm[2]))
+```
+
+```{r channel-table}
+channels %>%
+  transmute(Filter = paste0("F ", lo, "–", hi, " nm"),
+            `Illumination (nm)` = x_nm, Signal = signal) %>%
+  knitr::kable(align = "lcl", caption = "Imaging channels (filter window and illumination wavelength).")
+```
+
+```{r filter-overview, fig.width=6.5, fig.height=3.4, fig.cap="Filter windows (grey bars) and illumination wavelengths of the imaging channels (dotted lines). The shaded band is the wavelength range of the spectra figures."}
+plot_filter_overview()
+```
+
+# Response variables
+
+**Surface.** Percentage change relative to the initial area (`0` = no change, `-20` = 20 % loss, `+20` = 20 % gain):
+
+$$
+\%\Delta Surface = 100 \times \frac{Surface_{final} - Surface_{initial}}{Surface_{initial}}
+$$
+
+**Imaging channels.** Log~2~ ratio of the final to the initial signal (`0` = no change, `-1` = halved, `+1` = doubled). The log~2~ ratio is used because it gives a better-behaved distribution than the raw ratio:
+
+$$
+\log_2(R) = \log_2\left(\frac{Signal_{final}}{Signal_{initial}}\right)
+$$
+
+**F 590–710 / F 659–779 nm ratio.** Change in the relative response of the two fluorescence channels (x405), to be compared with the spectra (positive = the F 620-680 nm channel increased relative to the F 689-749 nm one):
+
+$$
+\log_2\left(
+\frac{F_{620\text{--}680,final}/F_{689\text{--}749,final}}
+     {F_{620\text{--}680,initial}/F_{689\text{--}749,initial}}
+\right)
+$$
+
+# Statistical approach
+
+```{r approach-text}
+model_txt <- function(g, type) paste0("`response ~ ", paste(group_terms(g, type), collapse = " + "), "`")
+type_txt <- function(g) paste(map_chr(model_types, ~ paste0(tolower(type_label[[.x]]), " ", model_txt(g, .x))),
+                              collapse = " and ")
+approach <- paste0(
+  "Each response is fitted with ", if (both_models) "two additive models without interactions, a simple linear regression and a polynomial of degree 2: " else "an additive model without interactions: ",
+  type_txt(groups[1]),
+  if (multi_sp) paste0(" for both species pooled, then ", type_txt(focus_species[1]), " for each species separately"),
+  ". Effects are tested with a sequential (Type I) ANOVA at $\\alpha$ = ", alpha,
+  ", and the text gives the verdict, *F*, *p*, *R*², AIC and the number of leaves *n* for each model",
+  if (use_linear) " (with the slope of burial time, change per day, for the linear model)",
+  if (use_poly) " (with the curvature for the polynomial model)", ".",
+  if (both_models) paste0(" The two models are then compared: the polynomial is retained as the best model only if its quadratic term significantly improves the fit (nested *F*-test, $\\alpha$ = ", alpha, ") and lowers the AIC; otherwise the simpler linear model is kept.") else "",
+  " In the figures, the curves are the models of the analysis themselves, fitted to each species (with a different intercept per substrate, which shifts the curves), and the p-value of the whole model (overall *F*-test), the *R*\u00b2 and adjusted *R*\u00b2 of the whole model and the equations written on each panel are those of the text. The pooled models are given in the text and tables only.")
+```
+
+`r approach`
+
+# Data
+
+After removing the problematic samples that concern this subset (`r nrow(excluded_focus)`), the dataset contains `r sum(!is.na(paired_data$time))` paired measurements, buried for `r paste(sort(unique(paired_data$time)), collapse = ", ")` days.
+
+```{r excluded}
+if (nrow(excluded_focus) > 0) {
+  excluded_focus %>%
+    knitr::kable(col.names = c("Leaf", "Substrate", "Reason"),
+                 caption = "Samples excluded from the statistics.")
+}
+```
+
+```{r sample-size}
+paired_data %>%
+  filter(!is.na(time)) %>%
+  count(species, substrate) %>%
+  pivot_wider(names_from = substrate, values_from = n, values_fill = 0) %>%
+  knitr::kable(col.names = c("Species", str_to_sentence(names(.)[-1])),
+               caption = "Sample size per species and substrate.")
+```
+
+```{r data-warnings, results='asis'}
+if (length(data_issues) > 0) {
+  cat("**Data warnings**\n\n", paste0("- ", unique(data_issues), collapse = "\n"), "\n\n", sep = "")
+}
+```
+
+# Composite images
+
+Composite images generated by *Leaf_decomposition_pipeline.ipynb*. Illumination and scale are identical across the set and the leaves are rotated. Each column is a vertical pair in chronological order: the bottom picture is the initial state of the picture above it. All samples are shown, including those excluded from the statistics.
+
+```{r image-composite}
+show_images(paths$progression,
+            must_match = c(if (!multi_sp) tolower(focus_species), if (!multi_sub) focus_substrate))
+```
+
+# Surface change
+
+`r bullets("surface")`
+
+`r means_line("surface", 1)`
+
+```{r surface-plot, fig.width=6.5, fig.height=3.8, fig.cap=trend_caps("Surface change through burial time")}
+draw_trends(function(tp) plot_change(responses[["surface"]], "Surface change (%)", type = tp))
+```
+
+# Fluorescence change
+
+Response: log~2~(final / initial) for each fluorescence channel (illumination at 405 nm); positive values = increase.
+
+## `r channels$label[channels$key == "F4_x405"]` nm
+
+`r bullets("F4_x405")`
+
+`r means_line("F4_x405")`
+
+## `r channels$label[channels$key == "F5_x405"]` nm
+
+`r bullets("F5_x405")`
+
+`r means_line("F5_x405")`
+
+## `r channels$label[channels$key == "F6_x405"]` nm
+
+`r bullets("F6_x405")`
+
+`r means_line("F6_x405")`
+
+```{r fluo-plots, fig.width=6.5, fig.height=9, fig.cap=trend_caps("fluorescence change for F 499\u2013643, F 590\u2013710 and F 659\u2013779 nm (x405)")}
+draw_trends(function(tp) plot_channels(c("F4_x405", "F5_x405", "F6_x405"), tp))
+```
+
+# Fluorescence ratio F 620–680 / F 689–749 nm
+
+Does the relative response of F 620–680 nm and F 689–749 nm change during burial?
+
+`r bullets("F5_F6")`
+
+`r means_line("F5_F6")`
+
+```{r f5f6-plot, fig.width=6.5, fig.height=3.8, fig.cap=trend_caps("change in the F 590\u2013710 / F 659\u2013779 nm ratio")}
+draw_trends(function(tp) plot_change(responses[["F5_F6"]], lab_log2("ratio final / ratio initial"), type = tp))
+```
+
+# Reflectance change
+
+Response: log~2~(final / initial) for each reflectance channel (illumination inside the filter window); positive values = increase.
+
+## `r channels$label[channels$key == "F2_x470"]` nm
+
+`r bullets("F2_x470")`
+
+`r means_line("F2_x470")`
+
+## `r channels$label[channels$key == "F3_x525"]` nm
+
+`r bullets("F3_x525")`
+
+`r means_line("F3_x525")`
+
+## `r channels$label[channels$key == "F5_x635"]` nm
+
+`r bullets("F5_x635")`
+
+`r means_line("F5_x635")`
+
+```{r refl-plots, fig.width=6.5, fig.height=9, fig.cap=trend_caps("reflectance change for F 442\u2013502, F 475\u2013545 and F 590\u2013710 nm")}
+draw_trends(function(tp) plot_channels(c("F2_x470", "F3_x525", "F5_x635"), tp))
+```
+
+# Summary of all models
+
+```{r summary-table}
+# Cell showing "F (p)" for one term of one model ("–" if the term is not in the model)
+term_cell <- function(m, term) {
+  if (is.null(m)) return("n/a")
+  r <- filter(anova_tab(m), term == !!term)
+  if (nrow(r) == 0) return("–")
+  sprintf("%s (%s)", num(r$F_value), if (is.na(r$p)) "NA" else if (r$p < 0.001) "<0.001" else num(r$p, 3))
+}
+
+summary_tab <- imap_dfr(models, function(resp, key) {
+  imap_dfr(resp, function(set, grp) {
+    best <- if (both_models) compare_models(set)$best else NULL
+    map_dfr(model_types, function(tp) {
+      m <- set[[tp]]
+      tibble(
+        Response          = resp_labels[[key]],
+        Group             = grp,
+        Model             = if (tp == "linear") "linear" else "poly. (2)",
+        `Species F (p)`   = term_cell(m, "species"),
+        `Time F (p)`      = term_cell(m, "time"),
+        `Time² F (p)`   = term_cell(m, "I(time^2)"),
+        `Substrate F (p)` = term_cell(m, "substrate"),
+        `Model p`         = if (is.null(m)) "n/a" else { pm <- model_f(m)$p; if (pm < 0.001) "<0.001" else num(pm, 3) },
+        `R²`               = if (is.null(m)) "n/a" else num(summary(m)$r.squared),
+        `Adj. R²`       = if (is.null(m)) "n/a" else num(summary(m)$adj.r.squared),
+        AIC               = if (is.null(m)) "n/a" else num(AIC(m), 1),
+        n                 = if (is.null(m)) NA_integer_ else nobs(m),
+        Best              = if (!is.null(best) && best == tp) "✓" else ""
+      )
+    })
+  })
+}) %>%
+  select(where(~ !all(.x %in% c("–", ""), na.rm = TRUE)))   # drop columns that never apply
+
+knitr::kable(summary_tab, align = c("l", "l", "l", rep("c", ncol(summary_tab) - 3)),
+             caption = "ANOVA (F, with p in brackets), p-value of the whole model, R², adjusted R², AIC and number of leaves for every model. A tick marks the best model of each pair (see Statistical approach).")
+```
+
+```{r best-count, results='asis'}
+if (both_models) {
+  best_all <- unlist(map(models, function(resp) map_chr(resp, function(set) {
+    cmp <- compare_models(set)
+    if (is.null(cmp)) NA_character_ else cmp$best
+  })))
+  n_ok <- sum(!is.na(best_all))
+  if (n_ok > 0) {
+    cat(sprintf("The polynomial model was preferred in %d of %d response × group comparisons; the linear model was sufficient in the other %d.\n\n",
+                sum(best_all == "polynomial", na.rm = TRUE), n_ok, sum(best_all == "linear", na.rm = TRUE)))
+  }
+}
+```
+
+# Spectra
+
+Spectra acquired with the JETI spectrophotometer, shown between `r spectra_cfg$window_nm[1]` and `r spectra_cfg$window_nm[2]` nm for `r species_txt` in `r substrate_txt`. Shorter wavelengths are removed by the filtering and are not shown or used in the normalisation. Within this range the spectra overlap the filters `r collapse_and(with(filter(filters, hi > spectra_cfg$window_nm[1], lo < spectra_cfg$window_nm[2]), paste0("F ", lo, "\u2013", hi, " nm")))` (the bars above each figure; F 499–643 nm only reaches the lower edge of the range). Each line is one burial time. Three versions are shown: raw radiance, radiance normalised to the area under the curve (AUC) inside the window, and radiance divided by the total integration time.
+
+```{r spectra-build, include=FALSE}
+# Builds and saves every spectra figure (also written to spectra_cfg$save_dir)
+spectra_result <- tryCatch(
+  build_spectra(spectra_cfg, tolower(focus_species), focus_substrate),
+  error = function(e) {
+    note_issue(sprintf("Spectra could not be drawn: %s.", conditionMessage(e)))
+    list(plots = list(), files = character())
+  }
+)
+spectra_fig_h <- 1.4 + 2.2 * length(focus_substrate) + 0.9
+```
+
+```{r spectra-notes, results='asis'}
+# Spectra that could not be drawn (for example damaged files) are listed here
+if (length(spectra_issues) > 0) {
+  cat("**Spectra notes**\n\n", paste0("- ", unique(spectra_issues), collapse = "\n"), "\n\n", sep = "")
+}
+```
+
+## Raw radiance
+
+```{r spectra-raw, fig.width=7, fig.height=spectra_fig_h, fig.cap=spectra_caps("raw"), dpi=300}
+for (p in spectra_result$plots[["raw"]]) print(p)
+```
+
+## Normalised to the area under the curve (AUC)
+
+```{r spectra-auc, fig.width=7, fig.height=spectra_fig_h, fig.cap=spectra_caps("auc"), dpi=300}
+for (p in spectra_result$plots[["auc"]]) print(p)
+```
+
+## Normalised by integration time
+
+```{r spectra-time, fig.width=7, fig.height=spectra_fig_h, fig.cap=spectra_caps("time"), dpi=300}
+for (p in spectra_result$plots[["time"]]) print(p)
+```
