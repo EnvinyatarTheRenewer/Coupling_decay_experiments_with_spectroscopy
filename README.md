@@ -2,7 +2,7 @@
 This repository was designed for a study on plant decomposition.
 
 ## Data Availability
-You can find the *betula* leaf decomposition multispectral imaging data: which is a folder that was compressed and that is called **'data_betula_clay.zip'** at this [zenodo repository](https://doi.org/10.5281/zenodo.23668618). It contains all the 337 pictures in a .tif format taken during the multispectral imaging.
+You can find the *Betula* leaf decomposition multispectral imaging data: which is a folder that was compressed and that is called **'data_betula_clay.zip'** at this [zenodo repository](https://doi.org/10.5281/zenodo.23668618). It contains all the 337 pictures in a .tif format taken during the multispectral imaging.
 
 ## Content of the Repository
 This repository contains:
